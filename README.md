@@ -135,3 +135,7 @@ corpus/ stems/ data/                                         audio excerpts, sep
 
 Re-training on your own material: `tools/build_corpus.py` / `extend_corpus.py` → `separate.py` →
 `reference.py` → `nn.py` (cross-validation) → `final.py` (export) → `tests/make_vectors.py`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
