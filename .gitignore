@@ -6,8 +6,6 @@ data/*
 !data/results_tables.md
 !data/model_accurate.pt
 !data/model_fast.pt
-# 12 s music excerpt used by the port checks and the live view's test clip
-tests/vectors/clip.f32
 # build products and local environment
 tests/kd_cli_*
 kd_cli

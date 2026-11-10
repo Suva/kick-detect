@@ -1,11 +1,14 @@
 """Create port-verification vectors: a 12 s clip plus expected activations/events for each weight set.
-   python tests/make_vectors.py [corpus_excerpt_name]"""
+   python tests/make_vectors.py [audio_file_or_corpus_excerpt_name] [start_seconds] [source_label]"""
 import os, sys, json, numpy as np, soundfile as sf
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0, HERE)
 from kickdetect.kick_detector import KickDetector
 name = sys.argv[1] if len(sys.argv) > 1 else "hardtechno_e4dbf109_b"
-x, sr = sf.read(os.path.join(HERE, "corpus", name + ".flac"), dtype="float32", always_2d=True)
-x = x.mean(1)[8 * sr:20 * sr].astype(np.float32)
+path = name if os.path.exists(name) else os.path.join(HERE, "corpus", name + ".flac")
+start = float(sys.argv[2]) if len(sys.argv) > 2 else 8.0
+if len(sys.argv) > 3: name = sys.argv[3]
+x, sr = sf.read(path, dtype="float32", always_2d=True)
+x = x.mean(1)[int(start * sr):int((start + 12) * sr)].astype(np.float32)
 V = os.path.join(HERE, "tests/vectors"); x.tofile(os.path.join(V, "clip.f32"))
 json.dump(dict(sample_rate=sr, samples=len(x), format="raw mono float32 little-endian", source=name), open(os.path.join(V, "clip.json"), "w"), indent=1)
 for mode in ("accurate", "fast"):

@@ -93,7 +93,7 @@ async function listSources() {
   const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "audioinput" && d.label);
   sel.innerHTML = "";
   for (const d of devs) sel.add(new Option(d.label, "dev:" + d.deviceId));
-  sel.add(new Option("Test clip (12 s hard techno, looped)", "clip"));
+  sel.add(new Option("Test clip (12 s, looped)", "clip"));
   sel.add(new Option("Audio file…", "file"));
   if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
 }
