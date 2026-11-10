@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kick detector — live view</title>
+<style>
+  :root { --bg:#101216; --panel:#181b21; --line:#2a2f38; --text:#d7dce4; --dim:#8c95a3; --wave:#5aa7ff; --act:#f2a33a; --raw:#77808f; --kick:#ff4d6a; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.4 -apple-system, "Segoe UI", sans-serif; display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  label { color: var(--dim); display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  select, button, input[type=number] { background: #0f1115; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font: inherit; }
+  select { max-width: 260px; }
+  button { cursor: pointer; }
+  button.primary { background: #2b6fd6; border-color: #2b6fd6; color: #fff; font-weight: 600; }
+  input[type=range] { width: 130px; }
+  #lamp { width: 26px; height: 26px; border-radius: 50%; background: #2a1a1f; border: 1px solid var(--line); flex: none; }
+  #stats { margin-left: auto; display: flex; gap: 18px; font-variant-numeric: tabular-nums; }
+  #stats b { font-size: 18px; font-weight: 600; }
+  #stats span { color: var(--dim); }
+  main { flex: 1; min-height: 0; position: relative; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  footer { padding: 6px 16px; color: var(--dim); font-size: 12px; border-top: 1px solid var(--line); display: flex; gap: 18px; flex-wrap: wrap; }
+  footer i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  #msg { color: #ffb84d; }
+</style>
+</head>
+<body>
+<header>
+  <button id="start" class="primary">Start</button>
+  <label>Input <select id="source" disabled><option>press Start</option></select></label>
+  <input id="file" type="file" accept="audio/*" hidden>
+  <label>Mode <select id="mode"><option value="accurate">accurate (30 ms)</option><option value="fast">fast (14 ms)</option></select></label>
+  <label><input id="tempo" type="checkbox" checked> tempo assist</label>
+  <label>Threshold <input id="thr" type="range" min="0.5" max="0.999" step="0.001" value="0.985"><span id="thrv">0.985</span></label>
+  <label>Window <select id="win"><option value="2">2 s</option><option value="4" selected>4 s</option><option value="8">8 s</option></select></label>
+  <button id="pause" disabled>Pause</button>
+  <div id="stats">
+    <div id="lamp"></div>
+    <div><b id="count">0</b> <span>kicks</span></div>
+    <div><b id="bpm">–</b> <span>kicks/min</span></div>
+  </div>
+</header>
+<main><canvas id="cv"></canvas></main>
+<footer>
+  <span><i style="background:var(--wave)"></i>input waveform</span>
+  <span><i style="background:var(--act)"></i>detector activation</span>
+  <span><i style="background:var(--raw)"></i>network only (before tempo assist)</span>
+  <span><i style="background:var(--kick)"></i>detected kick, drawn at its onset</span>
+  <span id="info"></span>
+  <span id="msg"></span>
+</footer>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const Q = 128, CAP = 1 << 13;                       // ring capacity in render quanta (≥ 20 s)
+const mn = new Float32Array(CAP), mx = new Float32Array(CAP), act = new Float32Array(CAP), raw = new Float32Array(CAP);
+let head = 0;                                       // number of quanta received
+let kicks = [];                                     // {onset, at, strength} in stream samples
+let total = 0, lampUntil = 0, paused = false, frozen = null;
+let ctx, node, sink, src, stream, info = { threshold: 0.985, latency: 0.03 };
+
+const say = (t) => { $("msg").textContent = t || ""; };
+
+async function start() {
+  $("start").disabled = true;
+  try {
+    ctx = new AudioContext({ latencyHint: "interactive" });
+    const [wa, wf] = await Promise.all(["accurate", "fast"].map((m) => fetch(`../kickdetect/weights_${m}.json`).then((r) => r.json())));
+    await ctx.audioWorklet.addModule("kd-worklet.js");
+    node = new AudioWorkletNode(ctx, "kick-worklet", { numberOfInputs: 1, numberOfOutputs: 1, channelCountMode: "max", channelCount: 2,
+      processorOptions: { weights: { accurate: wa, fast: wf }, mode: $("mode").value, tempo: $("tempo").checked } });
+    node.port.onmessage = onData;
+    sink = new GainNode(ctx, { gain: 0 });          // keeps the worklet pulled without making sound
+    node.connect(sink).connect(ctx.destination);
+  } catch (e) { say("Could not start audio: " + e.message); $("start").disabled = false; return; }
+  let mic = false;
+  try { (await navigator.mediaDevices.getUserMedia({ audio: true })).getTracks().forEach((t) => t.stop()); mic = true; }
+  catch (e) { say("No microphone permission — only the test clip and files are available."); }
+  await listSources();
+  navigator.mediaDevices.addEventListener("devicechange", listSources);
+  $("source").disabled = false; $("pause").disabled = false; $("start").hidden = true;
+  const first = [...$("source").options].find((o) => o.value.startsWith("dev:"));
+  $("source").value = mic && first ? first.value : "clip";
+  await pick();
+  requestAnimationFrame(draw);
+}
+
+async function listSources() {
+  const sel = $("source"), cur = sel.value;
+  const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "audioinput" && d.label);
+  sel.innerHTML = "";
+  for (const d of devs) sel.add(new Option(d.label, "dev:" + d.deviceId));
+  sel.add(new Option("Test clip (12 s hard techno, looped)", "clip"));
+  sel.add(new Option("Audio file…", "file"));
+  if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+}
+
+function stopSource() {
+  if (src) { try { src.stop && src.stop(); } catch {} src.disconnect(); src = null; }
+  if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+}
+
+function playBuffer(buf) {
+  src = new AudioBufferSourceNode(ctx, { buffer: buf, loop: true });
+  src.connect(node); src.connect(ctx.destination); src.start();
+}
+
+async function pick() {
+  const v = $("source").value;
+  say("");
+  if (v === "file") { $("file").click(); return; }
+  stopSource(); resetView();
+  await ctx.resume();
+  try {
+    if (v === "clip") {
+      const f = new Float32Array(await (await fetch("../tests/vectors/clip.f32")).arrayBuffer());
+      const buf = ctx.createBuffer(1, f.length, 44100); buf.copyToChannel(f, 0);
+      playBuffer(buf);
+    } else {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: v.slice(4) },
+        echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: { ideal: 2 } } });
+      src = ctx.createMediaStreamSource(stream);
+      src.connect(node);                             // not routed to the speakers
+    }
+  } catch (e) { say("Could not open input: " + e.message); }
+}
+
+$("file").onchange = async () => {
+  const f = $("file").files[0]; if (!f) return;
+  stopSource(); resetView();
+  try { playBuffer(await ctx.decodeAudioData(await f.arrayBuffer())); say(f.name); }
+  catch (e) { say("Could not decode " + f.name); }
+  $("file").value = "";
+};
+
+function resetView() { kicks = []; total = 0; $("count").textContent = "0"; $("bpm").textContent = "–"; node.port.postMessage({ reset: true }); }
+
+function onData(e) {
+  const m = e.data;
+  if (m.info) {
+    info = m.info;
+    $("thr").value = info.threshold; $("thrv").textContent = (+info.threshold).toFixed(3);
+    $("info").textContent = `${info.sampleRate} Hz · reports ${Math.round(info.latency * 1000)} ms after onset`;
+    return;
+  }
+  for (let i = 0; i < m.mn.length; i++) { const k = (m.b0 + i) % CAP; mn[k] = m.mn[i]; mx[k] = m.mx[i]; act[k] = m.act[i]; raw[k] = m.raw[i]; }
+  head = m.b0 + m.mn.length;
+  if (m.events.length) {
+    kicks.push(...m.events); total += m.events.length; lampUntil = performance.now() + 90;
+    const lim = (head - CAP) * Q; while (kicks.length && kicks[0].onset < lim) kicks.shift();
+    $("count").textContent = total;
+    const t = kicks.slice(-9).map((k) => k.onset), iv = [];
+    for (let i = 1; i < t.length; i++) iv.push(t[i] - t[i - 1]);
+    iv.sort((a, b) => a - b);
+    $("bpm").textContent = iv.length >= 3 ? (60 * ctx.sampleRate / iv[iv.length >> 1]).toFixed(1) : "–";
+  }
+}
+
+const cv = $("cv"), g = cv.getContext("2d");
+const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const COL = { wave: css("--wave"), act: css("--act"), raw: css("--raw"), kick: css("--kick"), line: css("--line"), dim: css("--dim") };
+
+function draw(now) {
+  requestAnimationFrame(draw);
+  $("lamp").style.background = now < lampUntil ? COL.kick : "#2a1a1f";
+  const dpr = devicePixelRatio || 1, W = Math.round(cv.clientWidth * dpr), H = Math.round(cv.clientHeight * dpr);
+  if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+  const end = paused ? frozen : head;               // newest quantum shown (exclusive)
+  const nq = Math.min(Math.ceil(+$("win").value * (ctx ? ctx.sampleRate : 48000) / Q), CAP - 64);
+  const first = end - nq, xs = W / nq;
+  const hw = Math.round(H * 0.58), ha = H - hw;
+  g.clearRect(0, 0, W, H);
+  // grid: one line per second of stream time
+  g.strokeStyle = COL.line; g.lineWidth = 1; g.beginPath();
+  const qps = (ctx ? ctx.sampleRate : 48000) / Q;
+  for (let s = Math.ceil(first / qps); s * qps < end; s++) { const x = Math.round((s * qps - first) * xs) + 0.5; g.moveTo(x, 0); g.lineTo(x, H); }
+  g.moveTo(0, hw + 0.5); g.lineTo(W, hw + 0.5); g.stroke();
+  // waveform, scaled to the loudest peak in view
+  let pk = 0.02;
+  for (let q = Math.max(first, 0); q < end; q++) { const k = q % CAP; if (mx[k] > pk) pk = mx[k]; if (-mn[k] > pk) pk = -mn[k]; }
+  const mid = hw / 2, sc = (hw / 2 - 6 * dpr) / pk;
+  g.fillStyle = COL.wave; g.beginPath();
+  const bw = Math.max(xs, 1);
+  for (let q = Math.max(first, 0); q < end; q++) { const k = q % CAP, y0 = mid - mx[k] * sc, y1 = mid - mn[k] * sc; g.rect((q - first) * xs, y0, bw, Math.max(y1 - y0, 1)); }
+  g.fill();
+  // activation curves
+  const ay = (v) => hw + ha - 4 * dpr - v * (ha - 14 * dpr);
+  const curve = (arr, col, fill) => {
+    g.beginPath(); let st = false;
+    for (let q = Math.max(first, 0); q < end; q++) { const x = (q - first + 0.5) * xs, y = ay(arr[q % CAP]); st ? g.lineTo(x, y) : g.moveTo(x, y); st = true; }
+    g.strokeStyle = col; g.lineWidth = dpr; g.stroke();
+    if (fill && st) { g.lineTo((end - first) * xs, ay(0)); g.lineTo(Math.max(-first, 0) * xs, ay(0)); g.closePath(); g.globalAlpha = 0.18; g.fillStyle = col; g.fill(); g.globalAlpha = 1; }
+  };
+  curve(raw, COL.raw, false);
+  curve(act, COL.act, true);
+  g.setLineDash([6 * dpr, 5 * dpr]); g.strokeStyle = COL.dim; g.beginPath(); g.moveTo(0, ay(info.threshold)); g.lineTo(W, ay(info.threshold)); g.stroke(); g.setLineDash([]);
+  // kicks at their onset
+  g.strokeStyle = g.fillStyle = COL.kick; g.lineWidth = 1.5 * dpr;
+  for (const k of kicks) {
+    const x = (k.onset / Q - first) * xs; if (x < 0 || x > W) continue;
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
+    g.beginPath(); g.moveTo(x - 6 * dpr, 0); g.lineTo(x + 6 * dpr, 0); g.lineTo(x, 10 * dpr); g.fill();
+  }
+}
+
+$("start").onclick = start;
+$("source").onchange = pick;
+$("mode").onchange = () => node && node.port.postMessage({ mode: $("mode").value });
+$("tempo").onchange = () => node && node.port.postMessage({ tempo: $("tempo").checked });
+$("thr").oninput = () => { $("thrv").textContent = (+$("thr").value).toFixed(3); node && node.port.postMessage({ threshold: +$("thr").value }); };
+$("pause").onclick = () => { paused = !paused; frozen = head; $("pause").textContent = paused ? "Resume" : "Pause"; };
+addEventListener("keydown", (e) => { if (e.code === "Space" && !$("pause").disabled && e.target.tagName !== "SELECT") { e.preventDefault(); $("pause").click(); } });
+</script>
+</body>
+</html>

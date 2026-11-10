@@ -1,0 +1,6 @@
+{
+ "sample_rate": 44100,
+ "samples": 529200,
+ "format": "raw mono float32 little-endian",
+ "source": "hardtechno_e4dbf109_b"
+}

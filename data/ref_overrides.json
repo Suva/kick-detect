@@ -1,0 +1,10 @@
+{
+ "extra_09d003e9_a": "3-against-4 kick pattern: reference kept only the on-grid quarter of the kicks (verified visually)",
+ "extra_09d003e9_b": "same track as above",
+ "extra_13db594b_a": "reference locked to the off-beat clap; detector marks the visible kick sweeps on the beat (verified visually)",
+ "extra_6f099493_a": "reference marks snare/hat rolls off the beat; kick sweeps are where the detector fires (verified visually)",
+ "breaks_d8a2d93d_a": "labelled kick-free but contains sparse real kicks (clear sweeps) that the detector finds (verified visually)",
+ "extra_5a2635c8_a": "labelled kick-free but contains sparse sub-drum/kick hits (verified visually)",
+ "extra_36dd25c4_a": "labelled kick-free but contains isolated kick-like sub hits (verified visually)",
+ "holdout_d7720a43_a": "reference marks sit ~120 ms ahead of the visible kick sweeps (locked to another element); detector sits on the sweeps (verified visually)"
+}
